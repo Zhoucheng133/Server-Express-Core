@@ -15,7 +15,15 @@ type FileInfo struct {
 	Size int64  `json:"size,omitempty"` // 文件大小，目录不显示
 }
 
+var globalSSHClient *ssh.Client
+var globalSFTPClient *sftp.Client
+
 func SshLogin(url string, port string, username string, password string) string {
+
+	if globalSSHClient != nil {
+		return "NOTE: Connected"
+	}
+
 	config := &ssh.ClientConfig{
 		User: username,
 		Auth: []ssh.AuthMethod{
@@ -30,41 +38,38 @@ func SshLogin(url string, port string, username string, password string) string 
 		return fmt.Sprint("ERR: ", err.Error())
 	}
 
-	defer client.Close()
+	globalSSHClient = client
 
-	session, _ := client.NewSession()
-	defer session.Close()
+	// defer client.Close()
 
-	out, _ := session.CombinedOutput("hostname")
+	// session, _ := client.NewSession()
+	// defer session.Close()
 
-	return string(out)
+	sftpclient, err := sftp.NewClient(globalSSHClient)
+	if err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+	globalSFTPClient = sftpclient
+
+	// out, _ := session.CombinedOutput("hostname")
+
+	return "ok"
 
 }
 
-func SftpGetList(url string, port string, username string, password string, path string) string {
-	config := &ssh.ClientConfig{
-		User: username,
-		Auth: []ssh.AuthMethod{
-			ssh.Password(password),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+func SftpGetList(path string) string {
+
+	// client, err := sftp.NewClient(globalSSHClient)
+	// if err != nil {
+	// 	return fmt.Sprint("ERR: ", err.Error())
+	// }
+	// defer client.Close()
+
+	if globalSSHClient == nil {
+		return "ERR: Not connected"
 	}
 
-	sshClient, err := ssh.Dial("tcp", fmt.Sprint(url, ":", port), config)
-
-	if err != nil {
-		return fmt.Sprint("ERR: ", err.Error())
-	}
-
-	defer sshClient.Close()
-
-	client, err := sftp.NewClient(sshClient)
-	if err != nil {
-		return fmt.Sprint("ERR: ", err.Error())
-	}
-	defer client.Close()
-
-	files, err := client.ReadDir(path)
+	files, err := globalSFTPClient.ReadDir(path)
 	if err != nil {
 		return fmt.Sprint("ERR: ", err.Error())
 	}
