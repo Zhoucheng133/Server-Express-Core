@@ -3,70 +3,87 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"sync"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
-type FileInfo struct {
-	Type string `json:"type"`           // "dir" 或 "file"
-	Name string `json:"name"`           // 文件/目录名
-	Size int64  `json:"size,omitempty"` // 文件大小，目录不显示
-}
-
 var globalSSHClient *ssh.Client
 var globalSFTPClient *sftp.Client
+var lock sync.Mutex
+var sshConfig *ssh.ClientConfig
+var sshAddr string
 
-func SshLogin(url string, port string, username string, password string) string {
+func SshLogin(url, port, username, password string) string {
+	lock.Lock()
+	defer lock.Unlock()
 
 	if globalSSHClient != nil {
-		return "NOTE: Connected"
+		if sshAlive(globalSSHClient) {
+			return "NOTE: Connected"
+		}
+		// 自动重连
+		globalSSHClient.Close()
+		globalSSHClient = nil
+		globalSFTPClient = nil
 	}
 
-	config := &ssh.ClientConfig{
+	sshConfig = &ssh.ClientConfig{
 		User: username,
 		Auth: []ssh.AuthMethod{
 			ssh.Password(password),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         5 * time.Second,
 	}
 
-	client, err := ssh.Dial("tcp", fmt.Sprint(url, ":", port), config)
+	sshAddr = fmt.Sprintf("%s:%s", url, port)
 
+	client, err := ssh.Dial("tcp", sshAddr, sshConfig)
 	if err != nil {
 		return fmt.Sprint("ERR: ", err.Error())
 	}
-
 	globalSSHClient = client
 
-	// defer client.Close()
-
-	// session, _ := client.NewSession()
-	// defer session.Close()
-
-	sftpclient, err := sftp.NewClient(globalSSHClient)
+	sftpclient, err := sftp.NewClient(client)
 	if err != nil {
 		return fmt.Sprint("ERR: ", err.Error())
 	}
 	globalSFTPClient = sftpclient
 
-	// out, _ := session.CombinedOutput("hostname")
+	return "Ok"
+}
 
-	return "ok"
+// 检查 SSH 是否活着
+func sshAlive(client *ssh.Client) bool {
+	_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+	return err == nil
+}
 
+// 自动重连
+func reconnect() error {
+	if sshConfig == nil {
+		return fmt.Errorf("not logged in")
+	}
+	client, err := ssh.Dial("tcp", sshAddr, sshConfig)
+	if err != nil {
+		return err
+	}
+	globalSSHClient = client
+	globalSFTPClient, err = sftp.NewClient(client)
+	return err
 }
 
 func SftpGetList(path string) string {
+	lock.Lock()
+	defer lock.Unlock()
 
-	// client, err := sftp.NewClient(globalSSHClient)
-	// if err != nil {
-	// 	return fmt.Sprint("ERR: ", err.Error())
-	// }
-	// defer client.Close()
-
-	if globalSSHClient == nil {
-		return "ERR: Not connected"
+	if globalSFTPClient == nil || !sshAlive(globalSSHClient) {
+		if err := reconnect(); err != nil {
+			return fmt.Sprint("ERR: ", err.Error())
+		}
 	}
 
 	files, err := globalSFTPClient.ReadDir(path)
@@ -74,12 +91,16 @@ func SftpGetList(path string) string {
 		return fmt.Sprint("ERR: ", err.Error())
 	}
 
+	type FileInfo struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+		Size int64  `json:"size,omitempty"`
+	}
+
 	var list []FileInfo
 
 	for _, file := range files {
-		info := FileInfo{
-			Name: file.Name(),
-		}
+		info := FileInfo{Name: file.Name()}
 		if file.IsDir() {
 			info.Type = "dir"
 		} else {
@@ -89,11 +110,20 @@ func SftpGetList(path string) string {
 		list = append(list, info)
 	}
 
-	jsonData, err := json.Marshal(list)
-	if err != nil {
-		log.Fatal(err)
-	}
+	data, _ := json.Marshal(list)
+	return string(data)
+}
 
-	return string(jsonData)
+func Disconnect() string {
+	if sshConfig == nil {
+		return "ERR: Not logged in"
+	}
+	if globalSSHClient != nil {
+		globalSSHClient.Close()
+		globalSFTPClient.Close()
+		globalSSHClient = nil
+		globalSFTPClient = nil
+	}
+	return "Ok"
 
 }
