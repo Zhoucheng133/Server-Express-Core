@@ -58,8 +58,12 @@ func SshLogin(url, port, username, password string) string {
 
 // 检查 SSH 是否活着
 func sshAlive(client *ssh.Client) bool {
-	_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
-	return err == nil
+	sess, err := client.NewSession()
+	if err != nil {
+		return false
+	}
+	defer sess.Close()
+	return sess.Run("true") == nil
 }
 
 // 自动重连
