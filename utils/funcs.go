@@ -3,6 +3,9 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -16,6 +19,7 @@ var lock sync.Mutex
 var sshConfig *ssh.ClientConfig
 var sshAddr string
 
+// 登录
 func SshLogin(url, port, username, password string) string {
 	lock.Lock()
 	defer lock.Unlock()
@@ -53,7 +57,7 @@ func SshLogin(url, port, username, password string) string {
 	}
 	globalSFTPClient = sftpclient
 
-	return "Ok"
+	return "OK"
 }
 
 // 检查 SSH 是否活着
@@ -80,6 +84,35 @@ func reconnect() error {
 	return err
 }
 
+// 下载某个文件到本地
+func SftpDownload(path string, local string) string {
+	lock.Lock()
+	defer lock.Unlock()
+
+	if globalSFTPClient == nil || !sshAlive(globalSSHClient) {
+		if err := reconnect(); err != nil {
+			return fmt.Sprint("ERR: ", err.Error())
+		}
+	}
+
+	remoteFile, err := globalSFTPClient.Open(path)
+	if err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+	defer remoteFile.Close()
+	localFile, err := os.Create(filepath.Join(local, filepath.Base(path)))
+	if err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+	defer localFile.Close()
+	_, err = io.Copy(localFile, remoteFile)
+	if err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+	return "OK"
+}
+
+// 获取某个路径下所有的文件/目录
 func SftpGetList(path string) string {
 	lock.Lock()
 	defer lock.Unlock()
@@ -118,6 +151,7 @@ func SftpGetList(path string) string {
 	return string(data)
 }
 
+// 断开连接
 func Disconnect() string {
 	if sshConfig == nil {
 		return "ERR: Not logged in"
@@ -128,6 +162,6 @@ func Disconnect() string {
 		globalSSHClient = nil
 		globalSFTPClient = nil
 	}
-	return "Ok"
+	return "OK"
 
 }
