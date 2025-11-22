@@ -1,4 +1,4 @@
-module server_transfer_core
+module server_express_core
 
 go 1.24.0
 

@@ -1,7 +1,7 @@
 package main
 
 import "C"
-import "server_transfer_core/utils"
+import "server_express_core/utils"
 
 //export SSHLogin
 func SSHLogin(url *C.char, port *C.char, username *C.char, password *C.char) *C.char {
