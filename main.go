@@ -18,6 +18,11 @@ func Disconnect() *C.char {
 	return C.CString(utils.Disconnect())
 }
 
+//export SftpDownload
+func SftpDownload(path *C.char, local *C.char) *C.char {
+	return C.CString(utils.SftpDownload(C.GoString(path), C.GoString(local)))
+}
+
 //export SftpDelete
 func SftpDelete(path *C.char) *C.char {
 	return C.CString(utils.SftpDelete(C.GoString(path)))
