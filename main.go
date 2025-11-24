@@ -18,4 +18,11 @@ func Disconnect() *C.char {
 	return C.CString(utils.Disconnect())
 }
 
+//export SftpDelete
+func SftpDelete(path *C.char) *C.char {
+	return C.CString(utils.SftpDelete(C.GoString(path)))
+}
+
+
+
 func main() {}

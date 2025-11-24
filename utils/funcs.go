@@ -112,6 +112,43 @@ func SftpDownload(path string, local string) string {
 	return "OK"
 }
 
+func SftpDelete(path string) string {
+	lock.Lock()
+	defer lock.Unlock()
+
+	if globalSFTPClient == nil || !sshAlive(globalSSHClient) {
+		if err := reconnect(); err != nil {
+			return fmt.Sprint("ERR: ", err.Error())
+		}
+	}
+
+	// 检查文件或目录是否存在
+	_, err := globalSFTPClient.Stat(path)
+	if err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+
+	// 判断是文件还是目录
+	fileInfo, err := globalSFTPClient.Stat(path)
+	if err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+
+	if fileInfo.IsDir() {
+		err = globalSFTPClient.RemoveDirectory(path)
+		if err != nil {
+			return fmt.Sprint("ERR: ", err.Error())
+		}
+	} else {
+		err = globalSFTPClient.Remove(path)
+		if err != nil {
+			return fmt.Sprint("ERR: ", err.Error())
+		}
+	}
+
+	return "OK"
+}
+
 // 获取某个路径下所有的文件/目录
 func SftpGetList(path string) string {
 	lock.Lock()
