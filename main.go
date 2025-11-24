@@ -23,6 +23,9 @@ func SftpDelete(path *C.char) *C.char {
 	return C.CString(utils.SftpDelete(C.GoString(path)))
 }
 
-
+//export SftpRename
+func SftpRename(path *C.char, newName *C.char) *C.char {
+	return C.CString(utils.SftpRename(C.GoString(path), C.GoString(newName)))
+}
 
 func main() {}

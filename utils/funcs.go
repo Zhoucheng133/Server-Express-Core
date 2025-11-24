@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"sync"
 	"time"
@@ -112,6 +113,38 @@ func SftpDownload(path string, local string) string {
 	return "OK"
 }
 
+func SftpRename(oldPath string, newName string) string {
+	lock.Lock()
+	defer lock.Unlock()
+
+	if globalSFTPClient == nil || !sshAlive(globalSSHClient) {
+		if err := reconnect(); err != nil {
+			return fmt.Sprint("ERR: ", err.Error())
+		}
+	}
+
+	// 检查原文件/目录是否存在
+	_, err := globalSFTPClient.Stat(oldPath)
+	if err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+
+	dir := path.Dir(oldPath)
+	newPath := path.Join(dir, newName)
+
+	// 检查新路径是否已存在，避免覆盖
+	_, err = globalSFTPClient.Stat(newPath)
+	if err == nil {
+		return "ERR: exist path"
+	}
+
+	err = globalSFTPClient.Rename(oldPath, newPath)
+	if err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+
+	return "OK"
+}
 func SftpDelete(path string) string {
 	lock.Lock()
 	defer lock.Unlock()
