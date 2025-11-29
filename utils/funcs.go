@@ -204,7 +204,7 @@ func SftpGetList(path string) string {
 		Size int64  `json:"size,omitempty"`
 	}
 
-	var list []FileInfo
+	list := make([]FileInfo, 0)
 
 	for _, file := range files {
 		info := FileInfo{Name: file.Name()}
