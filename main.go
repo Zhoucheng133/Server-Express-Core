@@ -33,4 +33,9 @@ func SftpRename(path *C.char, newName *C.char) *C.char {
 	return C.CString(utils.SftpRename(C.GoString(path), C.GoString(newName)))
 }
 
+//export SftpUpload
+func SftpUpload(path *C.char, local *C.char) *C.char {
+	return C.CString(utils.SftpUpload(C.GoString(path), C.GoString(local)))
+}
+
 func main() {}

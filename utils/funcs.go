@@ -113,6 +113,7 @@ func SftpDownload(path string, local string) string {
 	return "OK"
 }
 
+// 重命名文件
 func SftpRename(oldPath string, newName string) string {
 	lock.Lock()
 	defer lock.Unlock()
@@ -123,7 +124,6 @@ func SftpRename(oldPath string, newName string) string {
 		}
 	}
 
-	// 检查原文件/目录是否存在
 	_, err := globalSFTPClient.Stat(oldPath)
 	if err != nil {
 		return fmt.Sprint("ERR: ", err.Error())
@@ -132,7 +132,6 @@ func SftpRename(oldPath string, newName string) string {
 	dir := path.Dir(oldPath)
 	newPath := path.Join(dir, newName)
 
-	// 检查新路径是否已存在，避免覆盖
 	_, err = globalSFTPClient.Stat(newPath)
 	if err == nil {
 		return "ERR: exist path"
@@ -145,6 +144,8 @@ func SftpRename(oldPath string, newName string) string {
 
 	return "OK"
 }
+
+// 删除文件
 func SftpDelete(path string) string {
 	lock.Lock()
 	defer lock.Unlock()
@@ -155,13 +156,11 @@ func SftpDelete(path string) string {
 		}
 	}
 
-	// 检查文件或目录是否存在
 	_, err := globalSFTPClient.Stat(path)
 	if err != nil {
 		return fmt.Sprint("ERR: ", err.Error())
 	}
 
-	// 判断是文件还是目录
 	fileInfo, err := globalSFTPClient.Stat(path)
 	if err != nil {
 		return fmt.Sprint("ERR: ", err.Error())
@@ -219,6 +218,85 @@ func SftpGetList(path string) string {
 
 	data, _ := json.Marshal(list)
 	return string(data)
+}
+
+// 上传目录
+func uploadDirectory(client *sftp.Client, localDir, remoteDir string) error {
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		return fmt.Errorf("读取目录失败: %v", err)
+	}
+
+	// 创建远程目录（如果不存在）
+	client.MkdirAll(remoteDir)
+
+	for _, entry := range entries {
+		localPath := filepath.Join(localDir, entry.Name())
+		remotePath := path.Join(remoteDir, entry.Name())
+
+		if entry.IsDir() {
+			err = uploadDirectory(client, localPath, remotePath)
+			if err != nil {
+				return err
+			}
+		} else {
+			err = uploadFile(client, localPath, remotePath)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// 上传文件
+func uploadFile(client *sftp.Client, localFile, remotePath string) error {
+	srcFile, err := os.Open(localFile)
+	if err != nil {
+		return fmt.Errorf("打开本地文件失败: %v", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := client.Create(remotePath)
+	if err != nil {
+		return fmt.Errorf("创建远程文件失败: %v", err)
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	if err != nil {
+		return fmt.Errorf("上传文件失败: %v", err)
+	}
+
+	return nil
+}
+
+// 将本地文件上传到服务器
+func SftpUpload(remotePath string, local string) string {
+	lock.Lock()
+	defer lock.Unlock()
+
+	if globalSFTPClient == nil || !sshAlive(globalSSHClient) {
+		if err := reconnect(); err != nil {
+			return fmt.Sprint("ERR: ", err.Error())
+		}
+	}
+
+	info, err := os.Stat(local)
+	if err != nil {
+		return fmt.Sprint("ERR: 无法访问本地路径: ", err.Error())
+	}
+
+	if info.IsDir() {
+		err = uploadDirectory(globalSFTPClient, local, remotePath)
+	} else {
+		err = uploadFile(globalSFTPClient, local, remotePath)
+	}
+
+	if err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+	return "OK"
 }
 
 // 断开连接
