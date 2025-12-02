@@ -224,7 +224,7 @@ func SftpGetList(path string) string {
 func uploadDirectory(client *sftp.Client, localDir, remoteDir string) error {
 	entries, err := os.ReadDir(localDir)
 	if err != nil {
-		return fmt.Errorf("读取目录失败: %v", err)
+		return fmt.Errorf("%s", err.Error())
 	}
 
 	// 创建远程目录（如果不存在）
@@ -253,19 +253,22 @@ func uploadDirectory(client *sftp.Client, localDir, remoteDir string) error {
 func uploadFile(client *sftp.Client, localFile, remotePath string) error {
 	srcFile, err := os.Open(localFile)
 	if err != nil {
-		return fmt.Errorf("打开本地文件失败: %v", err)
+		fmt.Println("1")
+		return fmt.Errorf("%s", err.Error())
 	}
 	defer srcFile.Close()
 
 	dstFile, err := client.Create(remotePath)
 	if err != nil {
-		return fmt.Errorf("创建远程文件失败: %v", err)
+		fmt.Println("2")
+		return fmt.Errorf("%s", err.Error())
 	}
 	defer dstFile.Close()
 
 	_, err = io.Copy(dstFile, srcFile)
 	if err != nil {
-		return fmt.Errorf("上传文件失败: %v", err)
+		fmt.Println("3")
+		return fmt.Errorf("%s", err.Error())
 	}
 
 	return nil
@@ -284,7 +287,7 @@ func SftpUpload(remotePath string, local string) string {
 
 	info, err := os.Stat(local)
 	if err != nil {
-		return fmt.Sprint("ERR: 无法访问本地路径: ", err.Error())
+		return fmt.Sprint("ERR: ", err.Error())
 	}
 
 	if info.IsDir() {
