@@ -156,29 +156,39 @@ func SftpDelete(path string) string {
 		}
 	}
 
-	_, err := globalSFTPClient.Stat(path)
-	if err != nil {
-		return fmt.Sprint("ERR: ", err.Error())
-	}
-
 	fileInfo, err := globalSFTPClient.Stat(path)
 	if err != nil {
 		return fmt.Sprint("ERR: ", err.Error())
 	}
 
-	if fileInfo.IsDir() {
-		err = globalSFTPClient.RemoveDirectory(path)
-		if err != nil {
-			return fmt.Sprint("ERR: ", err.Error())
-		}
-	} else {
-		err = globalSFTPClient.Remove(path)
-		if err != nil {
-			return fmt.Sprint("ERR: ", err.Error())
-		}
+	// recursive delete
+	err = sftpRemoveRecursive(globalSFTPClient, path, fileInfo)
+	if err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
 	}
 
 	return "OK"
+}
+
+func sftpRemoveRecursive(client *sftp.Client, target string, info os.FileInfo) error {
+	if !info.IsDir() {
+		return client.Remove(target)
+	}
+
+	entries, err := client.ReadDir(target)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		childPath := path.Join(target, entry.Name())
+
+		if err := sftpRemoveRecursive(client, childPath, entry); err != nil {
+			return err
+		}
+	}
+
+	return client.RemoveDirectory(target)
 }
 
 // 获取某个路径下所有的文件/目录
