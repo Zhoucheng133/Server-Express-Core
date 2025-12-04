@@ -85,8 +85,8 @@ func reconnect() error {
 	return err
 }
 
-// 下载某个文件到本地
-func SftpDownload(path string, local string) string {
+// 下载文件或目录到本地
+func SftpDownload(remotePath string, localDir string) string {
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -96,20 +96,71 @@ func SftpDownload(path string, local string) string {
 		}
 	}
 
-	remoteFile, err := globalSFTPClient.Open(path)
+	info, err := globalSFTPClient.Stat(remotePath)
+	if err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+
+	if info.IsDir() {
+		return downloadDir(remotePath, localDir)
+	} else {
+		return downloadFile(remotePath, localDir)
+	}
+}
+
+// 单个文件下载
+func downloadFile(remotePath, localDir string) string {
+	remoteFile, err := globalSFTPClient.Open(remotePath)
 	if err != nil {
 		return fmt.Sprint("ERR: ", err.Error())
 	}
 	defer remoteFile.Close()
-	localFile, err := os.Create(filepath.Join(local, filepath.Base(path)))
+
+	if err := os.MkdirAll(localDir, 0755); err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+
+	localPath := filepath.Join(localDir, filepath.Base(remotePath))
+	localFile, err := os.Create(localPath)
 	if err != nil {
 		return fmt.Sprint("ERR: ", err.Error())
 	}
 	defer localFile.Close()
-	_, err = io.Copy(localFile, remoteFile)
+
+	if _, err := io.Copy(localFile, remoteFile); err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+
+	return "OK"
+}
+
+// 目录下载（递归）
+func downloadDir(remoteDir, localDir string) string {
+	entries, err := globalSFTPClient.ReadDir(remoteDir)
 	if err != nil {
 		return fmt.Sprint("ERR: ", err.Error())
 	}
+
+	localPath := filepath.Join(localDir, filepath.Base(remoteDir))
+	if err := os.MkdirAll(localPath, 0755); err != nil {
+		return fmt.Sprint("ERR: ", err.Error())
+	}
+
+	for _, entry := range entries {
+		remotePath := filepath.Join(remoteDir, entry.Name())
+		if entry.IsDir() {
+			// 递归下载子目录
+			if msg := downloadDir(remotePath, localPath); msg != "OK" {
+				return msg
+			}
+		} else {
+			// 下载文件
+			if msg := downloadFile(remotePath, localPath); msg != "OK" {
+				return msg
+			}
+		}
+	}
+
 	return "OK"
 }
 
