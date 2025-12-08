@@ -195,10 +195,6 @@ pub extern "C" fn SftpDownload(path: *const c_char, local: *const c_char) -> *mu
     let global = GLOBAL_SFTP.lock().unwrap();
     if let Some(conn) = &*global {
         let remote_path = Path::new(&remote_path_str);
-        
-        // 逻辑：将 remote 的文件名拼接到 local 路径后
-        // 例如 remote: /DATA/test.txt, local: User/Download
-        // 结果: User/Download/test.txt
         let file_name = match remote_path.file_name() {
             Some(name) => name,
             None => return return_err("Invalid remote path"),
@@ -214,8 +210,7 @@ pub extern "C" fn SftpDownload(path: *const c_char, local: *const c_char) -> *mu
     }
 }
 
-// SFTP 上传【?】
-// 递归上传逻辑
+// SFTP 递归上传【❌】
 fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Result<(), String> {
     if local_path.is_dir() {
         // 如果是目录，在远程创建目录
@@ -245,7 +240,7 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
     Ok(())
 }
 
-// SFTP 上传【?】
+// SFTP 上传【❌】
 #[no_mangle]
 pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut c_char {
     let remote_base_str = c_str_to_string(path); // 目标远程路径（例如 /DATA/）
@@ -275,7 +270,33 @@ pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut 
     }
 }
 
-// SFTP 删除【?】
+// 递归删除【✅】
+fn sftp_rm_rf(sftp: &ssh2::Sftp, path: &Path) -> Result<(), ssh2::Error> {
+    let stat = sftp.stat(path)?;
+    if stat.is_file() {
+        return sftp.unlink(path);
+    }
+    if stat.is_dir() {
+        let entries = sftp.readdir(path)?;
+        
+        for (child_path, child_stat) in entries {
+            let file_name = child_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if file_name == "." || file_name == ".." {
+                continue;
+            }
+
+            if child_stat.is_dir() {
+                sftp_rm_rf(sftp, &child_path)?;
+            } else {
+                sftp.unlink(&child_path)?;
+            }
+        }
+        return sftp.rmdir(path);
+    }
+    sftp.unlink(path)
+}
+
+// SFTP 删除【✅】
 #[no_mangle]
 pub extern "C" fn SftpDelete(path: *const c_char) -> *mut c_char {
     let path_str = c_str_to_string(path);
@@ -283,20 +304,19 @@ pub extern "C" fn SftpDelete(path: *const c_char) -> *mut c_char {
 
     if let Some(conn) = &*global {
         let p = Path::new(&path_str);
-        // 先尝试当做文件删除
-        if let Err(_) = conn.sftp.unlink(p) {
-            // 如果失败，尝试当做目录删除
-            if let Err(e2) = conn.sftp.rmdir(p) {
-                return return_err(format!("Delete failed (tried file and dir): {}", e2));
-            }
+        
+        // 调用递归删除函数
+        if let Err(e) = sftp_rm_rf(&conn.sftp, p) {
+            return return_err(format!("Delete failed: {}", e));
         }
+
         return_ok()
     } else {
         return_err("Not connected")
     }
 }
 
-// SFTP 重命名【完成】
+// SFTP 重命名【✅】
 #[no_mangle]
 pub extern "C" fn SftpRename(path: *const c_char, new_name: *const c_char) -> *mut c_char {
     let old_p = c_str_to_string(path);
@@ -326,8 +346,6 @@ pub extern "C" fn Disconnect() -> *mut c_char {
     return_ok()
 }
 
-// === 必须添加：内存释放函数 ===
-// Go 语言使用完 C.char 后，如果不释放，会导致 Rust 分配的内存泄漏
 #[no_mangle]
 pub extern "C" fn FreeString(ptr: *mut c_char) {
     if !ptr.is_null() {
