@@ -1,0 +1,328 @@
+use lazy_static::lazy_static;
+use serde::Serialize;
+use ssh2::{Session, Sftp};
+use std::ffi::{CStr, CString};
+use std::fs::{self, File};
+use std::io::{self};
+use std::net::TcpStream;
+use std::os::raw::c_char;
+use std::path::{Path};
+use std::sync::Mutex;
+
+// 定义全局状态，用于保存连接
+struct SftpConnection {
+    _tcp: TcpStream, // 需要保持 TCP 连接存活
+    _session: Session, // 需要保持 Session 存活
+    sftp: Sftp,
+}
+
+// 使用 Mutex 保证线程安全（虽然这个场景看起来是单线程调用）
+lazy_static! {
+    static ref GLOBAL_SFTP: Mutex<Option<SftpConnection>> = Mutex::new(None);
+}
+
+// 用于 JSON 序列化的结构体
+#[derive(Serialize)]
+struct FileInfo {
+    #[serde(rename = "type")]
+    file_type: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+}
+
+// --- 辅助函数 ---
+
+// 将 C 字符串转换为 Rust 字符串
+fn c_str_to_string(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    unsafe {
+        CStr::from_ptr(ptr)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+// 将 Rust 结果转换为 C 字符串指针 (*mut c_char)
+// 注意：这会分配内存，Go 端使用完后理论上需要释放，否则会内存泄漏
+fn return_string(s: String) -> *mut c_char {
+    CString::new(s).unwrap().into_raw()
+}
+
+fn return_ok() -> *mut c_char {
+    return_string("Ok".to_string())
+}
+
+fn return_err(e: impl std::fmt::Display) -> *mut c_char {
+    return_string(format!("ERR: {}", e))
+}
+
+// --- 核心功能实现 ---
+
+#[no_mangle]
+pub extern "C" fn SSHLogin(
+    url: *const c_char,
+    port: *const c_char,
+    username: *const c_char,
+    password: *const c_char,
+) -> *mut c_char {
+    let url = c_str_to_string(url);
+    let port = c_str_to_string(port);
+    let username = c_str_to_string(username);
+    let password = c_str_to_string(password);
+
+    let address = format!("{}:{}", url, port);
+
+    // 1. 连接 TCP
+    let tcp = match TcpStream::connect(&address) {
+        Ok(t) => t,
+        Err(e) => return return_err(format!("TCP connection failed: {}", e)),
+    };
+
+    // 2. 初始化 SSH Session
+    let mut sess = match Session::new() {
+        Ok(s) => s,
+        Err(e) => return return_err(format!("Session creation failed: {}", e)),
+    };
+
+    sess.set_tcp_stream(tcp.try_clone().unwrap());
+
+    if let Err(e) = sess.handshake() {
+        return return_err(format!("Handshake failed: {}", e));
+    }
+
+    // 3. 密码认证
+    if let Err(e) = sess.userauth_password(&username, &password) {
+        return return_err(format!("Authentication failed: {}", e));
+    }
+
+    // 4. 初始化 SFTP
+    let sftp = match sess.sftp() {
+        Ok(s) => s,
+        Err(e) => return return_err(format!("SFTP initialization failed: {}", e)),
+    };
+
+    // 5. 存入全局变量
+    let mut global = GLOBAL_SFTP.lock().unwrap();
+    *global = Some(SftpConnection {
+        _tcp: tcp,
+        _session: sess,
+        sftp,
+    });
+
+    return_ok()
+}
+
+#[no_mangle]
+pub extern "C" fn SftpList(path: *const c_char) -> *mut c_char {
+    let path_str = c_str_to_string(path);
+    let global = GLOBAL_SFTP.lock().unwrap();
+
+    if let Some(conn) = &*global {
+        match conn.sftp.readdir(Path::new(&path_str)) {
+            Ok(entries) => {
+                let mut file_infos = Vec::new();
+                for (path_buf, stat) in entries {
+                    let name = path_buf
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    
+                    // 简单的类型判断
+                    let f_type = if stat.is_dir() { "directory" } else { "file" };
+                    
+                    file_infos.push(FileInfo {
+                        file_type: f_type.to_string(),
+                        name,
+                        size: Some(stat.size.unwrap_or(0)),
+                    });
+                }
+                match serde_json::to_string(&file_infos) {
+                    Ok(json) => return_string(json),
+                    Err(e) => return_err(format!("JSON serialization failed: {}", e)),
+                }
+            }
+            Err(e) => return_err(format!("List failed: {}", e)),
+        }
+    } else {
+        return_err("Not connected")
+    }
+}
+
+// 递归下载逻辑
+fn download_recursive(sftp: &Sftp, remote_path: &Path, local_path: &Path) -> Result<(), String> {
+    // 获取远程文件状态
+    let stat = sftp.stat(remote_path).map_err(|e| e.to_string())?;
+
+    if stat.is_dir() {
+        // 如果是目录，在本地创建目录
+        if !local_path.exists() {
+            fs::create_dir_all(local_path).map_err(|e| e.to_string())?;
+        }
+
+        // 读取远程目录内容
+        let entries = sftp.readdir(remote_path).map_err(|e| e.to_string())?;
+        for (child_remote_path, _) in entries {
+            let file_name = child_remote_path.file_name().unwrap();
+            // 排除 . 和 .. (ssh2 库通常会自动处理，但为了保险)
+            if file_name == "." || file_name == ".." { continue; }
+            
+            let child_local_path = local_path.join(file_name);
+            download_recursive(sftp, &child_remote_path, &child_local_path)?;
+        }
+    } else {
+        // 如果是文件，直接下载
+        // 确保父目录存在
+        if let Some(parent) = local_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        let mut remote_file = sftp.open(remote_path).map_err(|e| e.to_string())?;
+        let mut local_file = File::create(local_path).map_err(|e| e.to_string())?;
+        io::copy(&mut remote_file, &mut local_file).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[no_mangle]
+pub extern "C" fn SftpDownload(path: *const c_char, local: *const c_char) -> *mut c_char {
+    let remote_path_str = c_str_to_string(path);
+    let local_base_str = c_str_to_string(local);
+    
+    let global = GLOBAL_SFTP.lock().unwrap();
+    if let Some(conn) = &*global {
+        let remote_path = Path::new(&remote_path_str);
+        
+        // 逻辑：将 remote 的文件名拼接到 local 路径后
+        // 例如 remote: /DATA/test.txt, local: User/Download
+        // 结果: User/Download/test.txt
+        let file_name = match remote_path.file_name() {
+            Some(name) => name,
+            None => return return_err("Invalid remote path"),
+        };
+        let target_local = Path::new(&local_base_str).join(file_name);
+
+        match download_recursive(&conn.sftp, remote_path, &target_local) {
+            Ok(_) => return_ok(),
+            Err(e) => return_err(e),
+        }
+    } else {
+        return_err("Not connected")
+    }
+}
+
+// 递归上传逻辑
+fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Result<(), String> {
+    if local_path.is_dir() {
+        // 如果是目录，在远程创建目录
+        // 忽略错误（可能目录已存在）
+        let _ = sftp.mkdir(remote_path, 0o755);
+
+        let entries = fs::read_dir(local_path).map_err(|e| e.to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let child_local = entry.path();
+            let file_name = child_local.file_name().unwrap();
+            
+            // 手动拼接远程路径 (SFTP 路径通常是 Unix 风格)
+            // let remote_file_name = file_name.to_string_lossy();
+            // 这里简单使用 PathBuf，如果由 Windows 上传到 Linux，PathBuf 处理 / 或 \ 可能会有差异，
+            // 建议统一转为 Unix 风格字符串拼接。这里简化处理。
+            let child_remote = remote_path.join(file_name);
+            
+            upload_recursive(sftp, &child_local, &child_remote)?;
+        }
+    } else {
+        // 如果是文件
+        let mut local_file = File::open(local_path).map_err(|e| e.to_string())?;
+        let mut remote_file = sftp.create(remote_path).map_err(|e| e.to_string())?;
+        io::copy(&mut local_file, &mut remote_file).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[no_mangle]
+pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut c_char {
+    let remote_base_str = c_str_to_string(path); // 目标远程路径（例如 /DATA/）
+    let local_path_str = c_str_to_string(local); // 本地源路径 (例如 ./test.txt)
+
+    let global = GLOBAL_SFTP.lock().unwrap();
+    if let Some(conn) = &*global {
+        let local_path = Path::new(&local_path_str);
+        
+        // 逻辑同下载：将本地文件名拼接到远程路径后
+        let file_name = match local_path.file_name() {
+            Some(name) => name,
+            None => return return_err("Invalid local path"),
+        };
+        
+        // 这里需要注意：如果是在 Windows 编译运行，Path::join 可能会使用 '\'，而 SFTP 需要 '/'。
+        // 为了稳健性，这里应该强制转换为 Unix 路径，但为保持代码简洁使用标准 join。
+        // 大多数 ssh 服务器能处理。
+        let target_remote = Path::new(&remote_base_str).join(file_name);
+
+        match upload_recursive(&conn.sftp, local_path, &target_remote) {
+            Ok(_) => return_ok(),
+            Err(e) => return_err(e),
+        }
+    } else {
+        return_err("Not connected")
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn SftpDelete(path: *const c_char) -> *mut c_char {
+    let path_str = c_str_to_string(path);
+    let global = GLOBAL_SFTP.lock().unwrap();
+
+    if let Some(conn) = &*global {
+        let p = Path::new(&path_str);
+        // 先尝试当做文件删除
+        if let Err(_) = conn.sftp.unlink(p) {
+            // 如果失败，尝试当做目录删除
+            if let Err(e2) = conn.sftp.rmdir(p) {
+                return return_err(format!("Delete failed (tried file and dir): {}", e2));
+            }
+        }
+        return_ok()
+    } else {
+        return_err("Not connected")
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn SftpRename(path: *const c_char, new_name: *const c_char) -> *mut c_char {
+    let old_p = c_str_to_string(path);
+    let new_p = c_str_to_string(new_name);
+    let global = GLOBAL_SFTP.lock().unwrap();
+
+    if let Some(conn) = &*global {
+        match conn.sftp.rename(Path::new(&old_p), Path::new(&new_p), None) {
+            Ok(_) => return_ok(),
+            Err(e) => return_err(format!("Rename failed: {}", e)),
+        }
+    } else {
+        return_err("Not connected")
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Disconnect() -> *mut c_char {
+    let mut global = GLOBAL_SFTP.lock().unwrap();
+    *global = None; // Drop the connection
+    return_ok()
+}
+
+// === 必须添加：内存释放函数 ===
+// Go 语言使用完 C.char 后，如果不释放，会导致 Rust 分配的内存泄漏
+#[no_mangle]
+pub extern "C" fn FreeString(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        unsafe {
+            let _ = CString::from_raw(ptr);
+        }
+    }
+}
