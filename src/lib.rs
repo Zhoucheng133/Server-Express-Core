@@ -209,28 +209,56 @@ pub extern "C" fn SftpDownload(path: *const c_char, local: *const c_char) -> *mu
         return_err("Not connected")
     }
 }
+// 确保目录存在
+fn ensure_remote_dir(sftp: &Sftp, path: &Path) -> Result<(), String> {
+    let mut cur = Path::new("/").to_path_buf();
+
+    for comp in path.components() {
+        if let std::path::Component::Normal(name) = comp {
+            let name_str = name.to_string_lossy();
+            cur = cur.join(&*name_str);
+
+            // 尝试创建目录，不管是否已存在
+            let _ = sftp.mkdir(&cur, 0o755);
+        }
+    }
+
+    Ok(())
+}
 
 // SFTP 递归上传【❌】
 fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Result<(), String> {
-    if local_path.is_dir() {
-        let _ = sftp.mkdir(remote_path, 0o755);
+    let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
+    let remote_path = Path::new(&remote_path_str);
 
-        let entries = fs::read_dir(local_path).map_err(|e| e.to_string())?;
-        for entry in entries {
+    if local_path.is_dir() {
+        ensure_remote_dir(sftp, remote_path)?;
+
+        for entry in fs::read_dir(local_path).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             let child_local = entry.path();
-            let file_name = child_local.file_name().unwrap();
-            let child_remote = remote_path.join(file_name);
-            
+
+            let name = child_local.file_name().ok_or("Invalid local path")?;
+            let name_str = name.to_string_lossy();
+
+            let child_remote = remote_path.join(&*name_str);
+
             upload_recursive(sftp, &child_local, &child_remote)?;
         }
     } else {
+        if let Some(parent) = remote_path.parent() {
+            ensure_remote_dir(sftp, parent)?;
+        }
+
         let mut local_file = File::open(local_path).map_err(|e| e.to_string())?;
         let mut remote_file = sftp.create(remote_path).map_err(|e| e.to_string())?;
+
         io::copy(&mut local_file, &mut remote_file).map_err(|e| e.to_string())?;
     }
+
     Ok(())
 }
+
 
 // SFTP 上传【❌】
 #[no_mangle]
@@ -241,14 +269,18 @@ pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut 
     let global = GLOBAL_SFTP.lock().unwrap();
     if let Some(conn) = &*global {
         let local_path = Path::new(&local_path_str);
-        
-        let file_name = match local_path.file_name() {
-            Some(name) => name,
+
+        let local_name = match local_path.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
             None => return return_err("Invalid local path"),
         };
-        let target_remote = Path::new(&remote_base_str).join(file_name);
 
-        match upload_recursive(&conn.sftp, local_path, &target_remote) {
+        let remote_base_str = remote_base_str.replace("\\", "/");
+        let remote_base = Path::new(&remote_base_str);
+
+        let final_remote = remote_base.join(&local_name);
+
+        match upload_recursive(&conn.sftp, local_path, &final_remote) {
             Ok(_) => return_ok(),
             Err(e) => return_err(e),
         }
@@ -256,6 +288,7 @@ pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut 
         return_err("Not connected")
     }
 }
+
 
 // 递归删除【✅】
 fn sftp_rm_rf(sftp: &ssh2::Sftp, path: &Path) -> Result<(), ssh2::Error> {
