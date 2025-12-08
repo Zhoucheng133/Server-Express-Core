@@ -228,9 +228,6 @@ fn ensure_remote_dir(sftp: &Sftp, path: &Path) -> Result<(), String> {
 
 // SFTP 递归上传【❌】
 fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Result<(), String> {
-    let remote_path_str = remote_path.to_string_lossy().replace("\\", "/");
-    let remote_path = Path::new(&remote_path_str);
-
     if local_path.is_dir() {
         ensure_remote_dir(sftp, remote_path)?;
 
@@ -238,24 +235,21 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
             let entry = entry.map_err(|e| e.to_string())?;
             let child_local = entry.path();
 
-            let name = child_local.file_name().ok_or("Invalid local path")?;
-            let name_str = name.to_string_lossy();
-
-            let child_remote = remote_path.join(&*name_str);
+            let child_name = child_local.file_name().ok_or("Invalid local path")?;
+            let child_remote = remote_path.join(child_name);
 
             upload_recursive(sftp, &child_local, &child_remote)?;
         }
     } else {
+        // 上传文件前确保父目录存在
         if let Some(parent) = remote_path.parent() {
             ensure_remote_dir(sftp, parent)?;
         }
 
-        let mut local_file = File::open(local_path).map_err(|e| e.to_string())?;
+        let mut local_file = fs::File::open(local_path).map_err(|e| e.to_string())?;
         let mut remote_file = sftp.create(remote_path).map_err(|e| e.to_string())?;
-
         io::copy(&mut local_file, &mut remote_file).map_err(|e| e.to_string())?;
     }
-
     Ok(())
 }
 
@@ -270,17 +264,11 @@ pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut 
     if let Some(conn) = &*global {
         let local_path = Path::new(&local_path_str);
 
-        let local_name = match local_path.file_name() {
-            Some(name) => name.to_string_lossy().to_string(),
-            None => return return_err("Invalid local path"),
-        };
-
+        // remote_base 就是目标目录，不再拼接本地文件名
         let remote_base_str = remote_base_str.replace("\\", "/");
         let remote_base = Path::new(&remote_base_str);
 
-        let final_remote = remote_base.join(&local_name);
-
-        match upload_recursive(&conn.sftp, local_path, &final_remote) {
+        match upload_recursive(&conn.sftp, local_path, remote_base) {
             Ok(_) => return_ok(),
             Err(e) => return_err(e),
         }
@@ -288,7 +276,6 @@ pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut 
         return_err("Not connected")
     }
 }
-
 
 // 递归删除【✅】
 fn sftp_rm_rf(sftp: &ssh2::Sftp, path: &Path) -> Result<(), ssh2::Error> {
