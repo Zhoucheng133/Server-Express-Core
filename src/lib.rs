@@ -9,19 +9,17 @@ use std::os::raw::c_char;
 use std::path::{Path};
 use std::sync::Mutex;
 
-// 定义全局状态，用于保存连接
 struct SftpConnection {
-    _tcp: TcpStream, // 需要保持 TCP 连接存活
-    _session: Session, // 需要保持 Session 存活
+    _tcp: TcpStream, 
+    _session: Session,
     sftp: Sftp,
 }
 
-// 使用 Mutex 保证线程安全（虽然这个场景看起来是单线程调用）
+
 lazy_static! {
     static ref GLOBAL_SFTP: Mutex<Option<SftpConnection>> = Mutex::new(None);
 }
 
-// 用于 JSON 序列化的结构体
 #[derive(Serialize)]
 struct FileInfo {
     #[serde(rename = "type")]
@@ -31,9 +29,6 @@ struct FileInfo {
     size: Option<u64>,
 }
 
-// --- 辅助函数 ---
-
-// 将 C 字符串转换为 Rust 字符串
 fn c_str_to_string(ptr: *const c_char) -> String {
     if ptr.is_null() {
         return String::new();
@@ -45,8 +40,6 @@ fn c_str_to_string(ptr: *const c_char) -> String {
     }
 }
 
-// 将 Rust 结果转换为 C 字符串指针 (*mut c_char)
-// 注意：这会分配内存，Go 端使用完后理论上需要释放，否则会内存泄漏
 fn return_string(s: String) -> *mut c_char {
     CString::new(s).unwrap().into_raw()
 }
@@ -59,8 +52,8 @@ fn return_err(e: impl std::fmt::Display) -> *mut c_char {
     return_string(format!("ERR: {}", e))
 }
 
-// --- 核心功能实现 ---
 
+// SSH登录 【✅】
 #[no_mangle]
 pub extern "C" fn SSHLogin(
     url: *const c_char,
@@ -115,6 +108,7 @@ pub extern "C" fn SSHLogin(
     return_ok()
 }
 
+// SFTP 列表【✅】
 #[no_mangle]
 pub extern "C" fn SftpList(path: *const c_char) -> *mut c_char {
     let path_str = c_str_to_string(path);
@@ -131,13 +125,18 @@ pub extern "C" fn SftpList(path: *const c_char) -> *mut c_char {
                         .unwrap_or("")
                         .to_string();
                     
-                    // 简单的类型判断
-                    let f_type = if stat.is_dir() { "directory" } else { "file" };
+                    let f_type = if stat.is_dir() { "dir" } else { "file" };
+
+                    let size = if stat.is_dir() {
+                        None
+                    } else {
+                        Some(stat.size.unwrap_or(0))
+                    };
                     
                     file_infos.push(FileInfo {
                         file_type: f_type.to_string(),
                         name,
-                        size: Some(stat.size.unwrap_or(0)),
+                        size,
                     });
                 }
                 match serde_json::to_string(&file_infos) {
@@ -152,7 +151,7 @@ pub extern "C" fn SftpList(path: *const c_char) -> *mut c_char {
     }
 }
 
-// 递归下载逻辑
+// SFTP 递归下载【✅】
 fn download_recursive(sftp: &Sftp, remote_path: &Path, local_path: &Path) -> Result<(), String> {
     // 获取远程文件状态
     let stat = sftp.stat(remote_path).map_err(|e| e.to_string())?;
@@ -187,6 +186,7 @@ fn download_recursive(sftp: &Sftp, remote_path: &Path, local_path: &Path) -> Res
     Ok(())
 }
 
+// SFTP 下载【✅】
 #[no_mangle]
 pub extern "C" fn SftpDownload(path: *const c_char, local: *const c_char) -> *mut c_char {
     let remote_path_str = c_str_to_string(path);
@@ -214,6 +214,7 @@ pub extern "C" fn SftpDownload(path: *const c_char, local: *const c_char) -> *mu
     }
 }
 
+// SFTP 上传【?】
 // 递归上传逻辑
 fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Result<(), String> {
     if local_path.is_dir() {
@@ -244,6 +245,7 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
     Ok(())
 }
 
+// SFTP 上传【?】
 #[no_mangle]
 pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut c_char {
     let remote_base_str = c_str_to_string(path); // 目标远程路径（例如 /DATA/）
@@ -273,6 +275,7 @@ pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut 
     }
 }
 
+// SFTP 删除【?】
 #[no_mangle]
 pub extern "C" fn SftpDelete(path: *const c_char) -> *mut c_char {
     let path_str = c_str_to_string(path);
@@ -293,14 +296,20 @@ pub extern "C" fn SftpDelete(path: *const c_char) -> *mut c_char {
     }
 }
 
+// SFTP 重命名【完成】
 #[no_mangle]
 pub extern "C" fn SftpRename(path: *const c_char, new_name: *const c_char) -> *mut c_char {
     let old_p = c_str_to_string(path);
     let new_p = c_str_to_string(new_name);
+    if new_p.contains('/') || new_p.contains('\\') {
+        return return_err("Invalid new name: cannot contain '/' or '\\'");
+    }
+    let old_path = Path::new(&old_p);
+    let parent = old_path.parent().unwrap_or(Path::new("."));
+    let new_path = parent.join(&new_p);
     let global = GLOBAL_SFTP.lock().unwrap();
-
     if let Some(conn) = &*global {
-        match conn.sftp.rename(Path::new(&old_p), Path::new(&new_p), None) {
+        match conn.sftp.rename(old_path, &new_path, None) {
             Ok(_) => return_ok(),
             Err(e) => return_err(format!("Rename failed: {}", e)),
         }
@@ -309,6 +318,7 @@ pub extern "C" fn SftpRename(path: *const c_char, new_name: *const c_char) -> *m
     }
 }
 
+// 断开连接【✅】
 #[no_mangle]
 pub extern "C" fn Disconnect() -> *mut c_char {
     let mut global = GLOBAL_SFTP.lock().unwrap();
