@@ -213,8 +213,6 @@ pub extern "C" fn SftpDownload(path: *const c_char, local: *const c_char) -> *mu
 // SFTP 递归上传【❌】
 fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Result<(), String> {
     if local_path.is_dir() {
-        // 如果是目录，在远程创建目录
-        // 忽略错误（可能目录已存在）
         let _ = sftp.mkdir(remote_path, 0o755);
 
         let entries = fs::read_dir(local_path).map_err(|e| e.to_string())?;
@@ -222,17 +220,11 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
             let entry = entry.map_err(|e| e.to_string())?;
             let child_local = entry.path();
             let file_name = child_local.file_name().unwrap();
-            
-            // 手动拼接远程路径 (SFTP 路径通常是 Unix 风格)
-            // let remote_file_name = file_name.to_string_lossy();
-            // 这里简单使用 PathBuf，如果由 Windows 上传到 Linux，PathBuf 处理 / 或 \ 可能会有差异，
-            // 建议统一转为 Unix 风格字符串拼接。这里简化处理。
             let child_remote = remote_path.join(file_name);
             
             upload_recursive(sftp, &child_local, &child_remote)?;
         }
     } else {
-        // 如果是文件
         let mut local_file = File::open(local_path).map_err(|e| e.to_string())?;
         let mut remote_file = sftp.create(remote_path).map_err(|e| e.to_string())?;
         io::copy(&mut local_file, &mut remote_file).map_err(|e| e.to_string())?;
@@ -243,22 +235,17 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
 // SFTP 上传【❌】
 #[no_mangle]
 pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut c_char {
-    let remote_base_str = c_str_to_string(path); // 目标远程路径（例如 /DATA/）
-    let local_path_str = c_str_to_string(local); // 本地源路径 (例如 ./test.txt)
+    let remote_base_str = c_str_to_string(path);
+    let local_path_str = c_str_to_string(local);
 
     let global = GLOBAL_SFTP.lock().unwrap();
     if let Some(conn) = &*global {
         let local_path = Path::new(&local_path_str);
         
-        // 逻辑同下载：将本地文件名拼接到远程路径后
         let file_name = match local_path.file_name() {
             Some(name) => name,
             None => return return_err("Invalid local path"),
         };
-        
-        // 这里需要注意：如果是在 Windows 编译运行，Path::join 可能会使用 '\'，而 SFTP 需要 '/'。
-        // 为了稳健性，这里应该强制转换为 Unix 路径，但为保持代码简洁使用标准 join。
-        // 大多数 ssh 服务器能处理。
         let target_remote = Path::new(&remote_base_str).join(file_name);
 
         match upload_recursive(&conn.sftp, local_path, &target_remote) {
