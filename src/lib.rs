@@ -52,7 +52,7 @@ fn return_string(s: String) -> *mut c_char {
 }
 
 fn return_ok() -> *mut c_char {
-    return_string("Ok".to_string())
+    return_string("OK".to_string())
 }
 
 fn return_err(e: impl std::fmt::Display) -> *mut c_char {
