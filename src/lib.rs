@@ -226,7 +226,7 @@ fn ensure_remote_dir(sftp: &Sftp, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// SFTP 递归上传【❌】
+// SFTP 递归上传【✅】
 fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Result<(), String> {
     if local_path.is_dir() {
         ensure_remote_dir(sftp, remote_path)?;
@@ -254,7 +254,7 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
 }
 
 
-// SFTP 上传【❌】
+// SFTP 上传【✅】
 #[no_mangle]
 pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut c_char {
     let remote_base_str = c_str_to_string(path);
@@ -264,7 +264,6 @@ pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut 
     if let Some(conn) = &*global {
         let local_path = Path::new(&local_path_str);
 
-        // remote_base 就是目标目录，不再拼接本地文件名
         let remote_base_str = remote_base_str.replace("\\", "/");
         let remote_base = Path::new(&remote_base_str);
 
