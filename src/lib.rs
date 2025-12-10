@@ -3,7 +3,7 @@ use serde::Serialize;
 use ssh2::{Session, Sftp};
 use std::ffi::{CStr, CString};
 use std::fs::{self, File};
-use std::io::{self};
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::raw::c_char;
 use std::path::{Path};
@@ -166,22 +166,27 @@ fn download_recursive(sftp: &Sftp, remote_path: &Path, local_path: &Path) -> Res
         let entries = sftp.readdir(remote_path).map_err(|e| e.to_string())?;
         for (child_remote_path, _) in entries {
             let file_name = child_remote_path.file_name().unwrap();
-            // 排除 . 和 .. (ssh2 库通常会自动处理，但为了保险)
+            // 排除 . 和 ..
             if file_name == "." || file_name == ".." { continue; }
             
             let child_local_path = local_path.join(file_name);
             download_recursive(sftp, &child_remote_path, &child_local_path)?;
         }
     } else {
-        // 如果是文件，直接下载
-        // 确保父目录存在
         if let Some(parent) = local_path.parent() {
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
 
         let mut remote_file = sftp.open(remote_path).map_err(|e| e.to_string())?;
         let mut local_file = File::create(local_path).map_err(|e| e.to_string())?;
-        io::copy(&mut remote_file, &mut local_file).map_err(|e| e.to_string())?;
+
+        // 使用大 buffer 手动循环读取
+        let mut buffer = vec![0u8; 512 * 1024]; // 512KB buffer，可调大到 1MB
+        loop {
+            let n = remote_file.read(&mut buffer).map_err(|e| e.to_string())?;
+            if n == 0 { break; }
+            local_file.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
@@ -241,14 +246,21 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
             upload_recursive(sftp, &child_local, &child_remote)?;
         }
     } else {
-        // 上传文件前确保父目录存在
+        // 上传文件前确保远程父目录存在
         if let Some(parent) = remote_path.parent() {
             ensure_remote_dir(sftp, parent)?;
         }
 
-        let mut local_file = fs::File::open(local_path).map_err(|e| e.to_string())?;
+        let mut local_file = File::open(local_path).map_err(|e| e.to_string())?;
         let mut remote_file = sftp.create(remote_path).map_err(|e| e.to_string())?;
-        io::copy(&mut local_file, &mut remote_file).map_err(|e| e.to_string())?;
+
+        // 使用大 buffer 手动循环读取
+        let mut buffer = vec![0u8; 512 * 1024]; // 512KB 或 1MB
+        loop {
+            let n = local_file.read(&mut buffer).map_err(|e| e.to_string())?;
+            if n == 0 { break; }
+            remote_file.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
