@@ -356,6 +356,31 @@ pub extern "C" fn SftpRename(path: *const c_char, new_name: *const c_char) -> *m
     }
 }
 
+// 创建文件夹【?】
+#[no_mangle]
+pub extern "C" fn SftpMkdir(path: *const c_char, name: *const c_char) -> *mut c_char {
+    let path = c_str_to_string(path);
+    let name = c_str_to_string(name);
+
+    let full_path_str = if path.ends_with('/') {
+        format!("{}{}", path, name)
+    } else {
+        format!("{}/{}", path, name)
+    };
+
+    let full_path = Path::new(&full_path_str);
+
+    let global = GLOBAL_SFTP.lock().unwrap();
+    if let Some(conn) = &*global {
+        match conn.sftp.mkdir(full_path, 0o755) {
+            Ok(_) => return_ok(),
+            Err(e) => return_err(format!("Mkdir failed: {}", e)),
+        }
+    } else {
+        return_err("Not connected")
+    }
+}
+
 // 断开连接【✅】
 #[no_mangle]
 pub extern "C" fn Disconnect() -> *mut c_char {
