@@ -6,18 +6,43 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::raw::c_char;
-use std::path::{Path};
+use std::path::Path;
 use std::sync::Mutex;
 
 struct SftpConnection {
-    _tcp: TcpStream, 
+    _tcp: TcpStream,
     _session: Session,
     sftp: Sftp,
 }
 
+#[derive(Clone, Serialize)]
+struct TransferProgress {
+    active: bool,
+    total_bytes: u64,
+    transferred_bytes: u64,
+    current_file: String,
+    current_file_bytes: u64,
+    current_file_total_bytes: u64,
+}
+
+impl Default for TransferProgress {
+    fn default() -> Self {
+        Self {
+            active: false,
+            total_bytes: 0,
+            transferred_bytes: 0,
+            current_file: String::new(),
+            current_file_bytes: 0,
+            current_file_total_bytes: 0,
+        }
+    }
+}
 
 lazy_static! {
     static ref GLOBAL_SFTP: Mutex<Option<SftpConnection>> = Mutex::new(None);
+    // Kept separate from GLOBAL_SFTP so Flutter can query it while a transfer holds
+    // the SFTP connection lock.
+    static ref TRANSFER_PROGRESS: Mutex<TransferProgress> = Mutex::new(TransferProgress::default());
 }
 
 #[derive(Serialize)]
@@ -33,11 +58,7 @@ fn c_str_to_string(ptr: *const c_char) -> String {
     if ptr.is_null() {
         return String::new();
     }
-    unsafe {
-        CStr::from_ptr(ptr)
-            .to_string_lossy()
-            .into_owned()
-    }
+    unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() }
 }
 
 fn return_string(s: String) -> *mut c_char {
@@ -52,6 +73,38 @@ fn return_err(e: impl std::fmt::Display) -> *mut c_char {
     return_string(format!("ERR: {}", e))
 }
 
+fn start_transfer(total_bytes: u64) {
+    *TRANSFER_PROGRESS.lock().unwrap() = TransferProgress {
+        active: true,
+        total_bytes,
+        ..TransferProgress::default()
+    };
+}
+
+fn finish_transfer() {
+    TRANSFER_PROGRESS.lock().unwrap().active = false;
+}
+
+fn start_file(path: &Path, total_bytes: u64) {
+    let mut progress = TRANSFER_PROGRESS.lock().unwrap();
+    progress.current_file = path.to_string_lossy().into_owned();
+    progress.current_file_total_bytes = total_bytes;
+    progress.current_file_bytes = 0;
+}
+
+fn add_transferred(bytes: u64) {
+    let mut progress = TRANSFER_PROGRESS.lock().unwrap();
+    progress.transferred_bytes += bytes;
+    progress.current_file_bytes += bytes;
+}
+
+#[no_mangle]
+pub extern "C" fn SftpTransferProgress() -> *mut c_char {
+    match serde_json::to_string(&*TRANSFER_PROGRESS.lock().unwrap()) {
+        Ok(json) => return_string(json),
+        Err(e) => return_err(format!("Progress serialization failed: {}", e)),
+    }
+}
 
 // SSH登录 【✅】
 #[no_mangle]
@@ -124,7 +177,7 @@ pub extern "C" fn SftpList(path: *const c_char) -> *mut c_char {
                         .and_then(|n| n.to_str())
                         .unwrap_or("")
                         .to_string();
-                    
+
                     let f_type = if stat.is_dir() { "dir" } else { "file" };
 
                     let size = if stat.is_dir() {
@@ -132,7 +185,7 @@ pub extern "C" fn SftpList(path: *const c_char) -> *mut c_char {
                     } else {
                         Some(stat.size.unwrap_or(0))
                     };
-                    
+
                     file_infos.push(FileInfo {
                         file_type: f_type.to_string(),
                         name,
@@ -151,6 +204,25 @@ pub extern "C" fn SftpList(path: *const c_char) -> *mut c_char {
     }
 }
 
+fn remote_size_recursive(sftp: &Sftp, path: &Path) -> Result<u64, String> {
+    let stat = sftp.stat(path).map_err(|e| e.to_string())?;
+    if !stat.is_dir() {
+        return Ok(stat.size.unwrap_or(0));
+    }
+
+    let mut total = 0;
+    for (child_path, _) in sftp.readdir(path).map_err(|e| e.to_string())? {
+        let name = child_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        if name != "." && name != ".." {
+            total += remote_size_recursive(sftp, &child_path)?;
+        }
+    }
+    Ok(total)
+}
+
 // SFTP 递归下载【✅】
 fn download_recursive(sftp: &Sftp, remote_path: &Path, local_path: &Path) -> Result<(), String> {
     // 获取远程文件状态
@@ -167,8 +239,10 @@ fn download_recursive(sftp: &Sftp, remote_path: &Path, local_path: &Path) -> Res
         for (child_remote_path, _) in entries {
             let file_name = child_remote_path.file_name().unwrap();
             // 排除 . 和 ..
-            if file_name == "." || file_name == ".." { continue; }
-            
+            if file_name == "." || file_name == ".." {
+                continue;
+            }
+
             let child_local_path = local_path.join(file_name);
             download_recursive(sftp, &child_remote_path, &child_local_path)?;
         }
@@ -177,6 +251,8 @@ fn download_recursive(sftp: &Sftp, remote_path: &Path, local_path: &Path) -> Res
             fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
 
+        let file_size = stat.size.unwrap_or(0);
+        start_file(remote_path, file_size);
         let mut remote_file = sftp.open(remote_path).map_err(|e| e.to_string())?;
         let mut local_file = File::create(local_path).map_err(|e| e.to_string())?;
 
@@ -184,8 +260,13 @@ fn download_recursive(sftp: &Sftp, remote_path: &Path, local_path: &Path) -> Res
         let mut buffer = vec![0u8; 512 * 1024]; // 512KB buffer，可调大到 1MB
         loop {
             let n = remote_file.read(&mut buffer).map_err(|e| e.to_string())?;
-            if n == 0 { break; }
-            local_file.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            local_file
+                .write_all(&buffer[..n])
+                .map_err(|e| e.to_string())?;
+            add_transferred(n as u64);
         }
     }
     Ok(())
@@ -196,7 +277,7 @@ fn download_recursive(sftp: &Sftp, remote_path: &Path, local_path: &Path) -> Res
 pub extern "C" fn SftpDownload(path: *const c_char, local: *const c_char) -> *mut c_char {
     let remote_path_str = c_str_to_string(path);
     let local_base_str = c_str_to_string(local);
-    
+
     let global = GLOBAL_SFTP.lock().unwrap();
     if let Some(conn) = &*global {
         let remote_path = Path::new(&remote_path_str);
@@ -206,7 +287,14 @@ pub extern "C" fn SftpDownload(path: *const c_char, local: *const c_char) -> *mu
         };
         let target_local = Path::new(&local_base_str).join(file_name);
 
-        match download_recursive(&conn.sftp, remote_path, &target_local) {
+        let total = match remote_size_recursive(&conn.sftp, remote_path) {
+            Ok(total) => total,
+            Err(e) => return return_err(e),
+        };
+        start_transfer(total);
+        let result = download_recursive(&conn.sftp, remote_path, &target_local);
+        finish_transfer();
+        match result {
             Ok(_) => return_ok(),
             Err(e) => return_err(e),
         }
@@ -231,6 +319,17 @@ fn ensure_remote_dir(sftp: &Sftp, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn local_size_recursive(path: &Path) -> Result<u64, String> {
+    if path.is_file() {
+        return Ok(fs::metadata(path).map_err(|e| e.to_string())?.len());
+    }
+    let mut total = 0;
+    for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
+        total += local_size_recursive(&entry.map_err(|e| e.to_string())?.path())?;
+    }
+    Ok(total)
+}
+
 // SFTP 递归上传【✅】
 fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Result<(), String> {
     if local_path.is_dir() {
@@ -251,6 +350,8 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
             ensure_remote_dir(sftp, parent)?;
         }
 
+        let file_size = fs::metadata(local_path).map_err(|e| e.to_string())?.len();
+        start_file(local_path, file_size);
         let mut local_file = File::open(local_path).map_err(|e| e.to_string())?;
         let mut remote_file = sftp.create(remote_path).map_err(|e| e.to_string())?;
 
@@ -258,13 +359,17 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
         let mut buffer = vec![0u8; 512 * 1024]; // 512KB 或 1MB
         loop {
             let n = local_file.read(&mut buffer).map_err(|e| e.to_string())?;
-            if n == 0 { break; }
-            remote_file.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            remote_file
+                .write_all(&buffer[..n])
+                .map_err(|e| e.to_string())?;
+            add_transferred(n as u64);
         }
     }
     Ok(())
 }
-
 
 // SFTP 上传【✅】
 #[no_mangle]
@@ -279,7 +384,14 @@ pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut 
         let remote_base_str = remote_base_str.replace("\\", "/");
         let remote_base = Path::new(&remote_base_str);
 
-        match upload_recursive(&conn.sftp, local_path, remote_base) {
+        let total = match local_size_recursive(local_path) {
+            Ok(total) => total,
+            Err(e) => return return_err(e),
+        };
+        start_transfer(total);
+        let result = upload_recursive(&conn.sftp, local_path, remote_base);
+        finish_transfer();
+        match result {
             Ok(_) => return_ok(),
             Err(e) => return_err(e),
         }
@@ -296,9 +408,12 @@ fn sftp_rm_rf(sftp: &ssh2::Sftp, path: &Path) -> Result<(), ssh2::Error> {
     }
     if stat.is_dir() {
         let entries = sftp.readdir(path)?;
-        
+
         for (child_path, child_stat) in entries {
-            let file_name = child_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let file_name = child_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
             if file_name == "." || file_name == ".." {
                 continue;
             }
@@ -322,7 +437,7 @@ pub extern "C" fn SftpDelete(path: *const c_char) -> *mut c_char {
 
     if let Some(conn) = &*global {
         let p = Path::new(&path_str);
-        
+
         // 调用递归删除函数
         if let Err(e) = sftp_rm_rf(&conn.sftp, p) {
             return return_err(format!("Delete failed: {}", e));
