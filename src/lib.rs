@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::raw::c_char;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 struct SftpConnection {
@@ -43,6 +44,7 @@ lazy_static! {
     // Kept separate from GLOBAL_SFTP so Flutter can query it while a transfer holds
     // the SFTP connection lock.
     static ref TRANSFER_PROGRESS: Mutex<TransferProgress> = Mutex::new(TransferProgress::default());
+    static ref CANCEL_FLAG: AtomicBool = AtomicBool::new(false);
 }
 
 #[derive(Serialize)]
@@ -96,6 +98,20 @@ fn add_transferred(bytes: u64) {
     let mut progress = TRANSFER_PROGRESS.lock().unwrap();
     progress.transferred_bytes += bytes;
     progress.current_file_bytes += bytes;
+}
+
+fn is_cancelled() -> bool {
+    CANCEL_FLAG.load(Ordering::Relaxed)
+}
+
+fn reset_cancel() {
+    CANCEL_FLAG.store(false, Ordering::Relaxed);
+}
+
+#[no_mangle]
+pub extern "C" fn SftpCancel() -> *mut c_char {
+    CANCEL_FLAG.store(true, Ordering::Relaxed);
+    return_ok()
 }
 
 #[no_mangle]
@@ -225,6 +241,9 @@ fn remote_size_recursive(sftp: &Sftp, path: &Path) -> Result<u64, String> {
 
 // SFTP 递归下载【✅】
 fn download_recursive(sftp: &Sftp, remote_path: &Path, local_path: &Path) -> Result<(), String> {
+    if is_cancelled() {
+        return Err("Cancelled".to_string());
+    }
     // 获取远程文件状态
     let stat = sftp.stat(remote_path).map_err(|e| e.to_string())?;
 
@@ -259,6 +278,9 @@ fn download_recursive(sftp: &Sftp, remote_path: &Path, local_path: &Path) -> Res
         // 使用大 buffer 手动循环读取
         let mut buffer = vec![0u8; 512 * 1024]; // 512KB buffer，可调大到 1MB
         loop {
+            if is_cancelled() {
+                return Err("Cancelled".to_string());
+            }
             let n = remote_file.read(&mut buffer).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
@@ -291,12 +313,18 @@ pub extern "C" fn SftpDownload(path: *const c_char, local: *const c_char) -> *mu
             Ok(total) => total,
             Err(e) => return return_err(e),
         };
+        reset_cancel();
         start_transfer(total);
         let result = download_recursive(&conn.sftp, remote_path, &target_local);
         finish_transfer();
         match result {
             Ok(_) => return_ok(),
-            Err(e) => return_err(e),
+            Err(e) => {
+                if e == "Cancelled" {
+                    return_ok();
+                }
+                return_err(e)
+            }
         }
     } else {
         return_err("Not connected")
@@ -332,6 +360,9 @@ fn local_size_recursive(path: &Path) -> Result<u64, String> {
 
 // SFTP 递归上传【✅】
 fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Result<(), String> {
+    if is_cancelled() {
+        return Err("Cancelled".to_string());
+    }
     if local_path.is_dir() {
         ensure_remote_dir(sftp, remote_path)?;
 
@@ -358,6 +389,9 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
         // 使用大 buffer 手动循环读取
         let mut buffer = vec![0u8; 512 * 1024]; // 512KB 或 1MB
         loop {
+            if is_cancelled() {
+                return Err("Cancelled".to_string());
+            }
             let n = local_file.read(&mut buffer).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
@@ -388,12 +422,18 @@ pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut 
             Ok(total) => total,
             Err(e) => return return_err(e),
         };
+        reset_cancel();
         start_transfer(total);
         let result = upload_recursive(&conn.sftp, local_path, remote_base);
         finish_transfer();
         match result {
             Ok(_) => return_ok(),
-            Err(e) => return_err(e),
+            Err(e) => {
+                if e == "Cancelled" {
+                    return_ok();
+                }
+                return_err(e)
+            }
         }
     } else {
         return_err("Not connected")
