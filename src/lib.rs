@@ -348,8 +348,14 @@ fn ensure_remote_dir(sftp: &Sftp, path: &Path) -> Result<(), String> {
 }
 
 fn local_size_recursive(path: &Path) -> Result<u64, String> {
-    if path.is_file() {
-        return Ok(fs::metadata(path).map_err(|e| e.to_string())?.len());
+    let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+
+    if meta.file_type().is_symlink() {
+        return Ok(0);
+    }
+
+    if meta.is_file() {
+        return Ok(meta.len());
     }
     let mut total = 0;
     for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
@@ -363,7 +369,14 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
     if is_cancelled() {
         return Err("Cancelled".to_string());
     }
-    if local_path.is_dir() {
+
+    let meta = fs::symlink_metadata(local_path).map_err(|e| e.to_string())?;
+
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    if meta.is_dir() {
         ensure_remote_dir(sftp, remote_path)?;
 
         for entry in fs::read_dir(local_path).map_err(|e| e.to_string())? {
