@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::raw::c_char;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -331,31 +331,21 @@ pub extern "C" fn SftpDownload(path: *const c_char, local: *const c_char) -> *mu
     }
 }
 // 确保目录存在
-fn ensure_remote_dir(sftp: &Sftp, path: &Path) -> Result<(), String> {
-    let mut cur = Path::new("/").to_path_buf();
-
-    for comp in path.components() {
-        if let std::path::Component::Normal(name) = comp {
-            let name_str = name.to_string_lossy();
-            cur = cur.join(&*name_str);
-
-            // 尝试创建目录，不管是否已存在
-            let _ = sftp.mkdir(&cur, 0o755);
-        }
+fn ensure_remote_dir(sftp: &Sftp, path: &str) -> Result<(), String> {
+    let path_str = path.replace("\\", "/");
+    let parts: Vec<&str> = path_str.split('/').filter(|s| !s.is_empty()).collect();
+    let mut cur = String::from("/");
+    for part in parts {
+        cur.push_str(part);
+        let _ = sftp.mkdir(Path::new(&cur), 0o755);
+        cur.push('/');
     }
-
     Ok(())
 }
 
-fn remote_join(base: &Path, name: &std::ffi::OsStr) -> std::path::PathBuf {
-    let base = base.to_string_lossy()
-        .replace("\\", "/");
-
-    PathBuf::from(format!(
-        "{}/{}",
-        base.trim_end_matches('/'),
-        name.to_string_lossy()
-    ))
+fn remote_join(base: &str, name: &std::ffi::OsStr) -> String {
+    let base = base.replace("\\", "/");
+    return format!("{}/{}", base.trim_end_matches('/'), name.to_string_lossy())
 }
 
 fn local_size_recursive(path: &Path) -> Result<u64, String> {
@@ -370,7 +360,7 @@ fn local_size_recursive(path: &Path) -> Result<u64, String> {
 }
 
 // SFTP 递归上传【✅】
-fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Result<(), String> {
+fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &str) -> Result<(), String> {
     if is_cancelled() {
         return Err("Cancelled".to_string());
     }
@@ -387,15 +377,14 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
             upload_recursive(sftp, &child_local, &child_remote)?;
         }
     } else {
-        // 上传文件前确保远程父目录存在
-        if let Some(parent) = remote_path.parent() {
-            ensure_remote_dir(sftp, parent)?;
+        if let Some(parent) = Path::new(remote_path).parent() {
+            ensure_remote_dir(sftp, &parent.to_string_lossy())?;
         }
 
         let file_size = fs::metadata(local_path).map_err(|e| e.to_string())?.len();
         start_file(local_path, file_size);
         let mut local_file = File::open(local_path).map_err(|e| e.to_string())?;
-        let mut remote_file = sftp.create(remote_path).map_err(|e| e.to_string())?;
+        let mut remote_file = sftp.create(Path::new(remote_path)).map_err(|e| e.to_string())?;
 
         // 使用大 buffer 手动循环读取
         let mut buffer = vec![0u8; 512 * 1024]; // 512KB 或 1MB
@@ -427,7 +416,6 @@ pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut 
         let local_path = Path::new(&local_path_str);
 
         let remote_base_str = remote_base_str.replace("\\", "/");
-        let remote_base = Path::new(&remote_base_str);
 
         let total = match local_size_recursive(local_path) {
             Ok(total) => total,
@@ -435,7 +423,7 @@ pub extern "C" fn SftpUpload(path: *const c_char, local: *const c_char) -> *mut 
         };
         reset_cancel();
         start_transfer(total);
-        let result = upload_recursive(&conn.sftp, local_path, remote_base);
+        let result = upload_recursive(&conn.sftp, local_path, &remote_base_str);
         finish_transfer();
         match result {
             Ok(_) => return_ok(),
