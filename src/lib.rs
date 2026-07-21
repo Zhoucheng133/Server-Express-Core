@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::raw::c_char;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -347,6 +347,17 @@ fn ensure_remote_dir(sftp: &Sftp, path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn remote_join(base: &Path, name: &std::ffi::OsStr) -> std::path::PathBuf {
+    let base = base.to_string_lossy()
+        .replace("\\", "/");
+
+    PathBuf::from(format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        name.to_string_lossy()
+    ))
+}
+
 fn local_size_recursive(path: &Path) -> Result<u64, String> {
     if path.is_file() {
         return Ok(fs::metadata(path).map_err(|e| e.to_string())?.len());
@@ -371,7 +382,7 @@ fn upload_recursive(sftp: &Sftp, local_path: &Path, remote_path: &Path) -> Resul
             let child_local = entry.path();
 
             let child_name = child_local.file_name().ok_or("Invalid local path")?;
-            let child_remote = remote_path.join(child_name);
+            let child_remote = remote_join(remote_path, child_name);
 
             upload_recursive(sftp, &child_local, &child_remote)?;
         }
