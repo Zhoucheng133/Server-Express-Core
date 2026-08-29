@@ -15,5 +15,21 @@ This is part of [Server Express](https://github.com/Zhoucheng133/Server-Express)
 Use the following command to generate a dynamic library
 
 ```bash
+# For Windows & macOS
 cargo build --release
+
+# For iOS
+export IPHONEOS_DEPLOYMENT_TARGET=13.0
+# Simulator
+cargo build --release --target aarch64-apple-ios-sim
+# Release
+cargo build --release --target aarch64-apple-ios
+# Merge
+xcodebuild -create-xcframework \
+-library core.dylib \
+-library core_sim.dylib \
+-output Core.xcframework
+
+# For Android
+cargo build --release --target aarch64-linux-android
 ```
