@@ -1,6 +1,7 @@
-/target
 test
 *.dylib
 *.so
 *.dll
 *.h
+tmp
+build
