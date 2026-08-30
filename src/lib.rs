@@ -535,6 +535,137 @@ pub extern "C" fn SftpMkdir(path: *const c_char, name: *const c_char) -> *mut c_
     }
 }
 
+// 递归复制远程文件或目录
+fn sftp_copy_recursive(sftp: &Sftp, src: &Path, dest: &Path) -> Result<(), String> {
+    let stat = sftp.stat(src).map_err(|e| e.to_string())?;
+    if stat.is_dir() {
+        let _ = sftp.mkdir(dest, 0o755);
+        let entries = sftp.readdir(src).map_err(|e| e.to_string())?;
+        for (child_src, _) in entries {
+            let name = match child_src.file_name() {
+                Some(n) => n,
+                None => continue,
+            };
+            if name == "." || name == ".." {
+                continue;
+            }
+            let child_dest = dest.join(name);
+            sftp_copy_recursive(sftp, &child_src, &child_dest)?;
+        }
+    } else {
+        if let Some(parent) = dest.parent() {
+            ensure_remote_dir(sftp, &parent.to_string_lossy())?;
+        }
+        let mut src_file = sftp.open(src).map_err(|e| e.to_string())?;
+        let mut dest_file = sftp.create(dest).map_err(|e| e.to_string())?;
+        let mut buffer = vec![0u8; 512 * 1024];
+        loop {
+            let n = src_file.read(&mut buffer).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            dest_file.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+// SFTP 复制接口
+#[no_mangle]
+pub extern "C" fn SftpCopy(
+    path: *const c_char,
+    dest: *const c_char,
+    files_json: *const c_char,
+) -> *mut c_char {
+    let path_str = c_str_to_string(path);
+    let dest_str = c_str_to_string(dest);
+    let files_json_str = c_str_to_string(files_json);
+
+    let files: Vec<String> = match serde_json::from_str(&files_json_str) {
+        Ok(f) => f,
+        Err(e) => return return_err(format!("Invalid files json: {}", e)),
+    };
+
+    let global = GLOBAL_SFTP.lock().unwrap();
+    if let Some(conn) = &*global {
+        let path_p = Path::new(&path_str);
+        let dest_p = Path::new(&dest_str);
+
+        // 1. 确保 path 中有 files 的所有文件
+        for file in &files {
+            let file_path = path_p.join(file);
+            if let Err(_) = conn.sftp.stat(&file_path) {
+                return return_err(format!("File not found in path: {}", file));
+            }
+        }
+
+        // 2. 进行复制
+        for file in files {
+            let src_file_path = path_p.join(&file);
+            let dest_file_path = dest_p.join(&file);
+            if let Err(e) = sftp_copy_recursive(&conn.sftp, &src_file_path, &dest_file_path) {
+                return return_err(format!("Copy failed for {}: {}", file, e));
+            }
+        }
+
+        return_ok()
+    } else {
+        return_err("Not connected")
+    }
+}
+
+// SFTP 移动接口
+#[no_mangle]
+pub extern "C" fn SftpMove(
+    path: *const c_char,
+    dest: *const c_char,
+    files_json: *const c_char,
+) -> *mut c_char {
+    let path_str = c_str_to_string(path);
+    let dest_str = c_str_to_string(dest);
+    let files_json_str = c_str_to_string(files_json);
+
+    let files: Vec<String> = match serde_json::from_str(&files_json_str) {
+        Ok(f) => f,
+        Err(e) => return return_err(format!("Invalid files json: {}", e)),
+    };
+
+    let global = GLOBAL_SFTP.lock().unwrap();
+    if let Some(conn) = &*global {
+        let path_p = Path::new(&path_str);
+        let dest_p = Path::new(&dest_str);
+
+        // 1. 确保 path 中有 files 的所有文件
+        for file in &files {
+            let file_path = path_p.join(file);
+            if let Err(_) = conn.sftp.stat(&file_path) {
+                return return_err(format!("File not found in path: {}", file));
+            }
+        }
+
+        // 2. 进行移动（重命名或复制后删除）
+        for file in files {
+            let src_file_path = path_p.join(&file);
+            let dest_file_path = dest_p.join(&file);
+            
+            // 先尝试直接 rename
+            if let Err(_) = conn.sftp.rename(&src_file_path, &dest_file_path, None) {
+                // 如果 rename 跨设备或者失败，退回到复制再删除
+                if let Err(e) = sftp_copy_recursive(&conn.sftp, &src_file_path, &dest_file_path) {
+                    return return_err(format!("Move (copy part) failed for {}: {}", file, e));
+                }
+                if let Err(e) = sftp_rm_rf(&conn.sftp, &src_file_path) {
+                    return return_err(format!("Move (remove old part) failed for {}: {}", file, e));
+                }
+            }
+        }
+
+        return_ok()
+    } else {
+        return_err("Not connected")
+    }
+}
+
 // 断开连接【✅】
 #[no_mangle]
 pub extern "C" fn Disconnect() -> *mut c_char {
