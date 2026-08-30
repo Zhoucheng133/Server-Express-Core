@@ -535,13 +535,41 @@ pub extern "C" fn SftpMkdir(path: *const c_char, name: *const c_char) -> *mut c_
     }
 }
 
+// 递归计算要复制的总字节数
+fn sftp_get_total_size(sftp: &Sftp, path: &Path) -> Result<u64, String> {
+    let stat = sftp.stat(path).map_err(|e| e.to_string())?;
+    if stat.is_dir() {
+        let mut total = 0;
+        let entries = sftp.readdir(path).map_err(|e| e.to_string())?;
+        for (child_path, _) in entries {
+            let name = match child_path.file_name() {
+                Some(n) => n,
+                None => continue,
+            };
+            if name == "." || name == ".." {
+                continue;
+            }
+            total += sftp_get_total_size(sftp, &child_path)?;
+        }
+        Ok(total)
+    } else {
+        Ok(stat.size.unwrap_or(0))
+    }
+}
+
 // 递归复制远程文件或目录
 fn sftp_copy_recursive(sftp: &Sftp, src: &Path, dest: &Path) -> Result<(), String> {
+    if is_cancelled() {
+        return Err("Cancelled".to_string());
+    }
     let stat = sftp.stat(src).map_err(|e| e.to_string())?;
     if stat.is_dir() {
         let _ = sftp.mkdir(dest, 0o755);
         let entries = sftp.readdir(src).map_err(|e| e.to_string())?;
         for (child_src, _) in entries {
+            if is_cancelled() {
+                return Err("Cancelled".to_string());
+            }
             let name = match child_src.file_name() {
                 Some(n) => n,
                 None => continue,
@@ -556,15 +584,22 @@ fn sftp_copy_recursive(sftp: &Sftp, src: &Path, dest: &Path) -> Result<(), Strin
         if let Some(parent) = dest.parent() {
             ensure_remote_dir(sftp, &parent.to_string_lossy())?;
         }
+        let file_size = stat.size.unwrap_or(0);
+        start_file(src, file_size);
+
         let mut src_file = sftp.open(src).map_err(|e| e.to_string())?;
         let mut dest_file = sftp.create(dest).map_err(|e| e.to_string())?;
         let mut buffer = vec![0u8; 512 * 1024];
         loop {
+            if is_cancelled() {
+                return Err("Cancelled".to_string());
+            }
             let n = src_file.read(&mut buffer).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
             }
             dest_file.write_all(&buffer[..n]).map_err(|e| e.to_string())?;
+            add_transferred(n as u64);
         }
     }
     Ok(())
@@ -586,29 +621,52 @@ pub extern "C" fn SftpCopy(
         Err(e) => return return_err(format!("Invalid files json: {}", e)),
     };
 
+    reset_cancel();
+
     let global = GLOBAL_SFTP.lock().unwrap();
     if let Some(conn) = &*global {
         let path_p = Path::new(&path_str);
         let dest_p = Path::new(&dest_str);
 
-        // 1. 确保 path 中有 files 的所有文件
+        // 1. 确保 path 中有 files 的所有文件，并计算总大小
+        let mut total_bytes = 0;
         for file in &files {
             let file_path = path_p.join(file);
-            if let Err(_) = conn.sftp.stat(&file_path) {
-                return return_err(format!("File not found in path: {}", file));
+            match sftp_get_total_size(&conn.sftp, &file_path) {
+                Ok(size) => total_bytes += size,
+                Err(_) => return return_err(format!("File not found in path: {}", file)),
             }
         }
 
+        start_transfer(total_bytes);
+
         // 2. 进行复制
+        let mut result = Ok(());
         for file in files {
+            if is_cancelled() {
+                result = Err("Cancelled".to_string());
+                break;
+            }
             let src_file_path = path_p.join(&file);
             let dest_file_path = dest_p.join(&file);
             if let Err(e) = sftp_copy_recursive(&conn.sftp, &src_file_path, &dest_file_path) {
-                return return_err(format!("Copy failed for {}: {}", file, e));
+                result = Err(format!("Copy failed for {}: {}", file, e));
+                break;
             }
         }
 
-        return_ok()
+        finish_transfer();
+
+        match result {
+            Ok(_) => {
+                if is_cancelled() {
+                    return_err("Cancelled")
+                } else {
+                    return_ok()
+                }
+            }
+            Err(e) => return_err(e),
+        }
     } else {
         return_err("Not connected")
     }
@@ -630,21 +688,32 @@ pub extern "C" fn SftpMove(
         Err(e) => return return_err(format!("Invalid files json: {}", e)),
     };
 
+    reset_cancel();
+
     let global = GLOBAL_SFTP.lock().unwrap();
     if let Some(conn) = &*global {
         let path_p = Path::new(&path_str);
         let dest_p = Path::new(&dest_str);
 
-        // 1. 确保 path 中有 files 的所有文件
+        // 1. 确保 path 中有 files 的所有文件，并计算总大小（如果需要回退到复制）
+        let mut total_bytes = 0;
         for file in &files {
             let file_path = path_p.join(file);
-            if let Err(_) = conn.sftp.stat(&file_path) {
-                return return_err(format!("File not found in path: {}", file));
+            match sftp_get_total_size(&conn.sftp, &file_path) {
+                Ok(size) => total_bytes += size,
+                Err(_) => return return_err(format!("File not found in path: {}", file)),
             }
         }
 
+        start_transfer(total_bytes);
+
         // 2. 进行移动（重命名或复制后删除）
+        let mut result = Ok(());
         for file in files {
+            if is_cancelled() {
+                result = Err("Cancelled".to_string());
+                break;
+            }
             let src_file_path = path_p.join(&file);
             let dest_file_path = dest_p.join(&file);
             
@@ -652,15 +721,33 @@ pub extern "C" fn SftpMove(
             if let Err(_) = conn.sftp.rename(&src_file_path, &dest_file_path, None) {
                 // 如果 rename 跨设备或者失败，退回到复制再删除
                 if let Err(e) = sftp_copy_recursive(&conn.sftp, &src_file_path, &dest_file_path) {
-                    return return_err(format!("Move (copy part) failed for {}: {}", file, e));
+                    result = Err(format!("Move (copy part) failed for {}: {}", file, e));
+                    break;
                 }
                 if let Err(e) = sftp_rm_rf(&conn.sftp, &src_file_path) {
-                    return return_err(format!("Move (remove old part) failed for {}: {}", file, e));
+                    result = Err(format!("Move (remove old part) failed for {}: {}", file, e));
+                    break;
+                }
+            } else {
+                // 如果直接 rename 成功，也可以算作完成了该文件的大小
+                if let Ok(size) = sftp_get_total_size(&conn.sftp, &dest_file_path) {
+                    add_transferred(size);
                 }
             }
         }
 
-        return_ok()
+        finish_transfer();
+
+        match result {
+            Ok(_) => {
+                if is_cancelled() {
+                    return_err("Cancelled")
+                } else {
+                    return_ok()
+                }
+            }
+            Err(e) => return_err(e),
+        }
     } else {
         return_err("Not connected")
     }
