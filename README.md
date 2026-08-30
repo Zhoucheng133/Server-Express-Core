@@ -31,5 +31,13 @@ xcodebuild -create-xcframework \
 -output target/Core.xcframework
 
 # For Android
+export ANDROID_NDK_HOME=/path/to/your/ndk
+export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64
+export PATH=$TOOLCHAIN/bin:$PATH
+
+export CC_aarch64_linux_android=$TOOLCHAIN/bin/aarch64-linux-android21-clang
+export CXX_aarch64_linux_android=$TOOLCHAIN/bin/aarch64-linux-android21-clang++
+export AR_aarch64_linux_android=$TOOLCHAIN/bin/llvm-ar
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/bin/aarch64-linux-android21-clang
 cargo build --release --target aarch64-linux-android
 ```
