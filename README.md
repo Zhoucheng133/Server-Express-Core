@@ -26,9 +26,9 @@ cargo build --release --target aarch64-apple-ios-sim
 cargo build --release --target aarch64-apple-ios
 # Merge
 xcodebuild -create-xcframework \
--library core.dylib \
--library core_sim.dylib \
--output Core.xcframework
+-library target/aarch64-apple-ios/release/libcore.dylib \
+-library target/aarch64-apple-ios-sim/release/libcore.dylib \
+-output target/Core.xcframework
 
 # For Android
 cargo build --release --target aarch64-linux-android
