@@ -190,7 +190,7 @@ func SftpList(path *C.char) *C.char {
 		return returnErr("List failed: %v", err)
 	}
 
-	var fileInfos []FileInfo
+	fileInfos := make([]FileInfo, 0)
 	for _, entry := range entries {
 		name := entry.Name()
 		if name == "." || name == ".." {
