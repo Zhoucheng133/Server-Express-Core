@@ -175,7 +175,7 @@ func SSHLogin(url, port, username, password *C.char) *C.char {
 
 //export SftpList
 func SftpList(path *C.char) *C.char {
-	pStr := C.GoString(path)
+	pStr := normalizePath(C.GoString(path))
 
 	globalSftpMutex.Lock()
 	conn := globalSftpConn
@@ -324,7 +324,7 @@ func downloadRecursive(sftpCli *sftp.Client, remotePath, localPath string) error
 
 //export SftpDownload
 func SftpDownload(path, local *C.char) *C.char {
-	remotePathStr := C.GoString(path)
+	remotePathStr := normalizePath(C.GoString(path))
 	localBaseStr := C.GoString(local)
 
 	globalSftpMutex.Lock()
@@ -362,8 +362,14 @@ func SftpDownload(path, local *C.char) *C.char {
 	return returnOk()
 }
 
+func normalizePath(p string) string {
+	p = strings.ReplaceAll(p, "\\", "/")
+	cleaned := filepath.Clean(p)
+	return filepath.ToSlash(cleaned)
+}
+
 func ensureRemoteDir(sftpCli *sftp.Client, remoteDir string) error {
-	remoteDir = strings.ReplaceAll(remoteDir, "\\", "/")
+	remoteDir = normalizePath(remoteDir)
 	parts := strings.Split(remoteDir, "/")
 	cur := ""
 	for _, part := range parts {
@@ -377,7 +383,7 @@ func ensureRemoteDir(sftpCli *sftp.Client, remoteDir string) error {
 }
 
 func remoteJoin(base string, name string) string {
-	base = strings.ReplaceAll(base, "\\", "/")
+	base = normalizePath(base)
 	return strings.TrimRight(base, "/") + "/" + name
 }
 
@@ -478,7 +484,7 @@ func uploadRecursive(sftpCli *sftp.Client, localPath, remotePath string) error {
 
 //export SftpUpload
 func SftpUpload(path, local *C.char) *C.char {
-	remoteBaseStr := C.GoString(path)
+	remoteBaseStr := normalizePath(C.GoString(path))
 	localPathStr := C.GoString(local)
 
 	globalSftpMutex.Lock()
@@ -539,7 +545,7 @@ func sftpRmRf(sftpCli *sftp.Client, path string) error {
 
 //export SftpDelete
 func SftpDelete(path *C.char) *C.char {
-	pathStr := C.GoString(path)
+	pathStr := normalizePath(C.GoString(path))
 
 	globalSftpMutex.Lock()
 	conn := globalSftpConn
@@ -557,7 +563,7 @@ func SftpDelete(path *C.char) *C.char {
 
 //export SftpRename
 func SftpRename(path, newName *C.char) *C.char {
-	oldP := C.GoString(path)
+	oldP := normalizePath(C.GoString(path))
 	newP := C.GoString(newName)
 
 	if strings.Contains(newP, "/") || strings.Contains(newP, "\\") {
@@ -588,7 +594,7 @@ func SftpRename(path, newName *C.char) *C.char {
 
 //export SftpMkdir
 func SftpMkdir(path, name *C.char) *C.char {
-	pStr := C.GoString(path)
+	pStr := normalizePath(C.GoString(path))
 	nStr := C.GoString(name)
 
 	var fullPath string
@@ -597,7 +603,7 @@ func SftpMkdir(path, name *C.char) *C.char {
 	} else {
 		fullPath = pStr + "/" + nStr
 	}
-	fullPath = strings.ReplaceAll(fullPath, "\\", "/")
+	fullPath = normalizePath(fullPath)
 
 	globalSftpMutex.Lock()
 	conn := globalSftpConn
@@ -716,8 +722,8 @@ func sftpCopyRecursive(sftpCli *sftp.Client, src, dest string) error {
 
 //export SftpCopy
 func SftpCopy(path, dest, filesJson *C.char) *C.char {
-	pathStr := C.GoString(path)
-	destStr := C.GoString(dest)
+	pathStr := normalizePath(C.GoString(path))
+	destStr := normalizePath(C.GoString(dest))
 	filesJsonStr := C.GoString(filesJson)
 
 	var files []string
@@ -781,8 +787,8 @@ func SftpCopy(path, dest, filesJson *C.char) *C.char {
 
 //export SftpMove
 func SftpMove(path, dest, filesJson *C.char) *C.char {
-	pathStr := C.GoString(path)
-	destStr := C.GoString(dest)
+	pathStr := normalizePath(C.GoString(path))
+	destStr := normalizePath(C.GoString(dest))
 	filesJsonStr := C.GoString(filesJson)
 
 	var files []string
